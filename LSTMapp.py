@@ -1,0 +1,152 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+import matplotlib.pyplot as plt
+import streamlit as st
+
+# Load and preprocess the data
+def load_and_preprocess_data(uploaded_file):
+    df = pd.read_csv(uploaded_file)
+    
+    # Error handling for missing 'timestamp' column
+    if 'timestamp' not in df.columns:
+        raise KeyError("The 'timestamp' column is missing in the uploaded CSV file.")
+    
+    # Convert timestamp to datetime
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df.set_index('timestamp', inplace=True)
+    
+    # Select the relevant columns
+    columns = ['Temperature', 'Wind Gust', 'Cloud Cover Total', 'Mean Sea Level Pressure', 'Evapotranspiration', 'Soil Temperature']
+    
+    # Error handling for missing columns
+    for col in columns:
+        if col not in df.columns:
+            raise KeyError(f"Missing required column: {col}")
+    
+    df = df[columns]
+    
+    # Handle missing values
+    df.fillna(method='ffill', inplace=True)
+    
+    # Normalize the data
+    scaler = MinMaxScaler()
+    df_scaled = pd.DataFrame(scaler.fit_transform(df), columns=df.columns, index=df.index)
+    
+    return df_scaled, scaler
+
+# Create sequences for LSTM input
+def create_sequences(data, seq_length):
+    X, y = [], []
+    for i in range(len(data) - seq_length):
+        X.append(data[i:i+seq_length])
+        y.append(data[i+seq_length])
+    return np.array(X), np.array(y)
+
+# Build the LSTM model
+def build_model(input_shape):
+    model = Sequential([
+        LSTM(64, return_sequences=True, input_shape=input_shape),
+        Dropout(0.3),
+        LSTM(64),
+        Dropout(0.3),
+        BatchNormalization(),
+        Dense(32, activation='relu'),
+        Dense(6)
+    ])
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    return model
+
+# Train the model
+def train_model(model, X_train, y_train, X_val, y_val, epochs=100, batch_size=32):
+    early_stopping = EarlyStopping(patience=10, restore_best_weights=True)
+    history = model.fit(
+        X_train, y_train,
+        epochs=epochs,
+        batch_size=batch_size,
+        validation_data=(X_val, y_val),
+        callbacks=[early_stopping],
+        verbose=1
+    )
+    return history
+
+# Evaluate the model
+def evaluate_model(model, X_test, y_test, scaler):
+    y_pred = model.predict(X_test)
+    
+    # Inverse transform the predictions and actual values
+    y_test_inv = scaler.inverse_transform(y_test)
+    y_pred_inv = scaler.inverse_transform(y_pred)
+    
+    # Calculate metrics
+    mae = mean_absolute_error(y_test_inv, y_pred_inv)
+    rmse = np.sqrt(mean_squared_error(y_test_inv, y_pred_inv))
+    r2 = r2_score(y_test_inv, y_pred_inv)
+    
+    return mae, rmse, r2, y_test_inv, y_pred_inv
+
+# Plot the results
+def plot_results(y_test_inv, y_pred_inv, variable_name):
+    fig, ax = plt.subplots(figsize=(14, 7))
+    ax.plot(y_test_inv, label='Actual')
+    ax.plot(y_pred_inv, label='Predicted')
+    ax.set_title(f'Actual vs Predicted - {variable_name}')
+    ax.set_xlabel('Time')
+    ax.set_ylabel(variable_name)
+    ax.legend()
+    ax.grid(True)
+    st.pyplot(fig)
+
+# Streamlit application
+def main():
+    st.title("LSTM Weather Prediction Model")
+    
+    # File upload
+    uploaded_file = st.file_uploader("Upload CSV file with weather data", type=['csv'])
+    
+    if uploaded_file is not None:
+        # User inputs for model training
+        seq_length = st.sidebar.slider("Sequence Length", 12, 48, 24)
+        epochs = st.sidebar.slider("Epochs", 50, 500, 100)
+        batch_size = st.sidebar.slider("Batch Size", 16, 128, 32)
+
+        # Load and preprocess the data
+        data, scaler = load_and_preprocess_data(uploaded_file)
+        
+        # Create sequences
+        X, y = create_sequences(data.values, seq_length)
+        
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+        
+        # Build and train the model
+        model = build_model((seq_length, X_train.shape[2]))
+        with st.spinner('Training the model...'):
+            history = train_model(model, X_train, y_train, X_val, y_val, epochs=epochs, batch_size=batch_size)
+        
+        # Evaluate the model
+        mae, rmse, r2, y_test_inv, y_pred_inv = evaluate_model(model, X_test, y_test, scaler)
+        
+        # Display metrics
+        st.subheader("Model Evaluation Metrics")
+        st.write(f"Mean Absolute Error (MAE): {mae}")
+        st.write(f"Root Mean Squared Error (RMSE): {rmse}")
+        st.write(f"R-Squared (R2): {r2}")
+        
+        # Plot results for temperature (index 0)
+        st.subheader("Temperature Prediction")
+        plot_results(y_test_inv[:, 0], y_pred_inv[:, 0], 'Temperature')
+        
+        st.success("Model Training and Evaluation Completed.")
+
+if __name__ == '__main__':
+    main()
+
+# streamlit run c:/Users/wishp/Downloads/LSTMapp.py
